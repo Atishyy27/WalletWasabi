@@ -27,6 +27,7 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw "build passed while tor was running" }
           if (-not (Select-String -Path build.log -Pattern "is still running and would be locked")) { throw "failed, but not with our error" }
           "failed as expected with our error"
+          exit 0
       - name: stop tor, rebuild passes
         shell: pwsh
         run: |
