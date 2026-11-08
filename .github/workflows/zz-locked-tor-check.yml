@@ -10,26 +10,52 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
-      - name: first build passes
-        run: dotnet build WalletWasabi.Fluent.Desktop -c Debug
+      - name: (a) normal build passes
+        shell: pwsh
+        run: |
+          dotnet build WalletWasabi.Fluent.Desktop -c Debug
+          if ($LASTEXITCODE -ne 0) { throw "FAIL (a): normal build failed" }
+          "PASS (a)"
       - name: start the bundled tor from the output directory
         shell: pwsh
         run: |
           $tor = Get-ChildItem WalletWasabi.Fluent.Desktop/bin -Recurse -Filter tor.exe | Select-Object -First 1
           if (-not $tor) { throw "tor.exe not found in the output" }
+          "TOR_OUT=$($tor.FullName)" | Out-File $env:GITHUB_ENV -Append
           Start-Process -FilePath $tor.FullName -ArgumentList '--SocksPort','0' -WindowStyle Hidden
           Start-Sleep 5
           Get-Process tor | Format-Table Id, Path
-      - name: rebuild must fail with the new error
+          if (-not (Get-Process tor -ErrorAction SilentlyContinue)) { throw "tor did not start" }
+      - name: (b) incremental rebuild with the same tor running passes
         shell: pwsh
         run: |
-          dotnet build WalletWasabi.Fluent.Desktop -c Debug --no-incremental 2>&1 | Tee-Object build.log
-          if ($LASTEXITCODE -eq 0) { throw "build passed while tor was running" }
-          if (-not (Select-String -Path build.log -Pattern "is still running and would be locked")) { throw "failed, but not with our error" }
-          "failed as expected with our error"
+          dotnet build WalletWasabi.Fluent.Desktop -c Debug 2>&1 | Tee-Object build-b.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "FAIL (b): build failed while the same tor was running" }
+          if (Select-String -Path build-b.log -Pattern "MSB3021|MSB3026|MSB3027|MSB3061|being used by another process|differs from the source") { throw "FAIL (b): locked-file or tor message in the log" }
+          if (-not (Get-Process tor -ErrorAction SilentlyContinue)) { throw "FAIL (b): tor is no longer running" }
+          "PASS (b)"
+      - name: (c) changed source tor with tor running fails with our error
+        shell: pwsh
+        run: |
+          $src = "WalletWasabi/BundledApps/Binaries/win-x64/Tor/tor.exe"
+          [System.IO.File]::AppendAllText((Resolve-Path $src), "x")
+          dotnet build WalletWasabi.Fluent.Desktop -c Debug 2>&1 | Tee-Object build-c.log
+          $code = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
+          if ($code -eq 0) { throw "FAIL (c): build passed with a different tor running" }
+          if (-not (Select-String -Path build-c.log -Pattern "is running and differs from the source tor.exe")) { throw "FAIL (c): failed, but not with our error" }
+          if (Select-String -Path build-c.log -Pattern "MSB3021|MSB3027") { throw "FAIL (c): the copy was attempted before our check" }
+          "PASS (c): failed as expected with our error"
           exit 0
-      - name: stop tor, rebuild passes
+      - name: (c) stop tor, rebuild passes and copies the new tor
         shell: pwsh
         run: |
           Get-Process tor | Stop-Process -Force
+          Start-Sleep 2
           dotnet build WalletWasabi.Fluent.Desktop -c Debug
+          if ($LASTEXITCODE -ne 0) { throw "FAIL (c): build failed after stopping tor" }
+          $a = (Get-FileHash "WalletWasabi/BundledApps/Binaries/win-x64/Tor/tor.exe").Hash
+          $b = (Get-FileHash $env:TOR_OUT).Hash
+          if ($a -ne $b) { throw "FAIL (c): output tor.exe was not updated" }
+          "PASS (c): rebuild passed and the output tor matches the source"
